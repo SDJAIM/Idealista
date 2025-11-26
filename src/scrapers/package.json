@@ -1,0 +1,23 @@
+{
+  "name": "scrapers",
+  "version": "1.0.0",
+  "description": "",
+  "main": "idealista.js",
+  "scripts": {
+    "start": "node main.js",
+    "scrape": "node main.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "chromadb": "^1.10.5",
+    "chromadb-default-embed": "^2.14.0",
+    "dotenv": "^16.3.1",
+    "neo4j-driver": "^5.13.0",
+    "node-telegram-bot-api": "^0.64.0",
+    "openai": "^4.20.1",
+    "selenium-webdriver": "^4.16.0"
+  }
+}
