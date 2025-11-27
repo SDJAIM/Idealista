@@ -2,257 +2,187 @@ const TelegramBot = require('node-telegram-bot-api');
 const { ChromaService } = require('./ChromaService.js');
 const { Neo4jService } = require('./Neo4jService.js');
 const OpenAI = require('openai');
-const { IdealistaScraper } = require('../scraper/IdealistaScraper.js');
 
 class TelegramService {
     constructor(telegramToken, openaiApiKey) {
-        this.token = telegramToken;
+        this.bot = new TelegramBot(telegramToken, { polling: true });
+        this.openai = new OpenAI({ apiKey: openaiApiKey });
         this.vectorService = new ChromaService();
         this.graphService = new Neo4jService();
-        this.openai = new OpenAI({ apiKey: openaiApiKey });
+        this.assistantId = process.env.OPENAI_ASSISTANT_ID;
+        if (!this.assistantId) {
+            throw new Error("❌ La variable de entorno OPENAI_ASSISTANT_ID es obligatoria.");
+        }
+        this.userThreads = new Map();
         
-        this.bot = new TelegramBot(this.token, { polling: true });
+        // --- INICIO DE LA CORRECCIÓN ---
+        // Llamamos a la inicialización, pero no esperamos aquí.
+        // El constructor debe ser rápido. La lógica de manejo de estado se hará dentro.
+        this.initializeServices();
+        // --- FIN DE LA CORRECCIÓN ---
+
         this.setupHandlers();
+        console.log(`✅ Telegram Bot iniciado para Asistente: ${this.assistantId}`);
+    }
+
+    // --- FUNCIÓN DE INICIALIZACIÓN ROBUSTA ---
+    async initializeServices() {
+        console.log("🔄 Inicializando todos los servicios...");
         
-        console.log("✅ Telegram Bot iniciado con ChatGPT como agente");
+        const services = [
+            this.vectorService.initialize(),
+            this.graphService.connect()
+        ];
+
+        const results = await Promise.allSettled(services);
+        let allServicesReady = true;
+
+        if (results[0].status === 'rejected') {
+            console.error('❌ Falló la inicialización de ChromaDB:', results[0].reason.message);
+            allServicesReady = false;
+        } else {
+            console.log('✅ ChromaDB listo y conectado.');
+        }
+
+        if (results[1].status === 'rejected') {
+            console.error('❌ Falló la inicialización de Neo4j:', results[1].reason.message);
+            allServicesReady = false;
+        } else {
+            console.log('✅ Neo4j listo y conectado.');
+        }
+
+        if (allServicesReady) {
+            console.log("✅ ¡Todos los servicios están conectados y listos para operar!");
+        } else {
+            console.error("⚠️ Uno o más servicios no pudieron iniciarse. El bot podría no funcionar correctamente.");
+        }
     }
 
     setupHandlers() {
         this.bot.on('message', async (msg) => {
-            const chatId = msg.chat.id;
-            if (msg.text?.startsWith('/')) return; // Ignorar comandos
-            if (msg.text) await this.handleChatGPTMessage(msg);
+            if (msg.text && !msg.text.startsWith('/')) {
+                await this.handleAssistantMessage(msg);
+            }
         });
-
-        this.bot.onText(/\/start/, async (msg) => {
-            await this.sendWelcome(msg.chat.id);
-        });
-
-        this.bot.onText(/\/scrape (.+)/, async (msg, match) => {
-            await this.handleScrapeCommand(msg, match[1]);
-        });
-
-        this.bot.onText(/\/search (.+)/, async (msg, match) => {
-            await this.handleSearchCommand(msg, match[1]);
+        this.bot.onText(/\/start/, (msg) => {
+            this.userThreads.delete(msg.chat.id);
+            this.sendWelcome(msg.chat.id);
         });
     }
 
-    async handleChatGPTMessage(msg) {
-        const chatId = msg.chat.id;
-        try {
-            await this.bot.sendChatAction(chatId, 'typing');
-            
-            const tools = [
-                {
-                    type: "function",
-                    function: {
-                        name: "search_semantic_properties",
-                        description: "Buscar propiedades usando búsqueda semántica",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                query: { type: "string" },
-                                limit: { type: "number", default: 5 }
-                            },
-                            required: ["query"]
-                        }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "search_filtered_properties",
-                        description: "Buscar propiedades usando filtros específicos",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                ciudad: { type: "string" },
-                                minPrice: { type: "number" },
-                                maxPrice: { type: "number" },
-                                minHabitaciones: { type: "number" },
-                                minMetros: { type: "number" },
-                                barrio: { type: "string" }
-                            }
-                        }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "get_available_cities",
-                        description: "Obtener lista de ciudades disponibles",
-                        parameters: { type: "object", properties: {} }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "get_available_neighborhoods",
-                        description: "Obtener barrios disponibles para una ciudad",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                city: { type: "string" }
-                            },
-                            required: ["city"]
-                        }
-                    }
-                }
-            ];
+    // ... (El resto de las funciones: formatPropertyMessage, escapeMarkdown, handleAssistantMessage, etc., se quedan exactamente igual que en la versión anterior)
+    escapeMarkdown(text) {
+        if (typeof text !== 'string' || text === null) return '';
+        const specials = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
+        const regex = new RegExp(`[${specials.map(c => `\\${c}`).join('')}]`, 'g');
+        return text.replace(regex, '\\$&');
+    }
 
-            const response = await this.openai.chat.completions.create({
-                model: "gpt-3.5-turbo-1106",
-                messages: [
-                    {
-                        role: "system",
-                        content: `Eres un asistente especializado en búsqueda de propiedades inmobiliarias. 
-                                Usa las funciones disponibles para buscar propiedades cuando el usuario lo solicite.
-                                Presenta los resultados de manera clara y organizada con todos los detalles importantes.
-                                Si no hay resultados, sugiere alternativas o ajusta los filtros.`
-                    },
-                    { role: "user", content: msg.text }
-                ],
-                tools: tools,
-                tool_choice: "auto"
+    formatPropertyMessage(property) {
+        const title = this.escapeMarkdown(property.title || "Propiedad sin título");
+        const price = this.escapeMarkdown(property.precio ? `${property.precio.toLocaleString('es-ES')}€` : "Precio no disponible");
+        const location = this.escapeMarkdown(`${property.barrio || 'Ubicación no especificada'}, ${property.ciudad || ''}`.trim());
+        const rooms = this.escapeMarkdown(property.habitaciones ? `${property.habitaciones} hab.` : "N/A");
+        const area = this.escapeMarkdown(property.metros ? `${property.metros} m²` : "N/A");
+
+        let message = `🏠 *${title}*\n\n`;
+        message += `💰 *Precio:* ${price}\n`;
+        message += `📍 *Ubicación:* ${location}\n`;
+        message += `🛏️ ${rooms} \\- 📐 ${area}\n`;
+
+        return message;
+    }
+
+    async handleAssistantMessage(msg) {
+        const chatId = msg.chat.id;
+        await this.bot.sendChatAction(chatId, 'typing');
+
+        try {
+            let threadId = this.userThreads.get(chatId);
+            if (!threadId) {
+                const thread = await this.openai.beta.threads.create();
+                threadId = thread.id;
+                this.userThreads.set(chatId, threadId);
+            }
+
+            await this.openai.beta.threads.messages.create(threadId, { role: "user", content: msg.text });
+
+            const run = await this.openai.beta.threads.runs.createAndPoll(threadId, {
+                assistant_id: this.assistantId,
             });
 
-            const responseMessage = response.choices[0].message;
-            
-            if (responseMessage.tool_calls) {
-                for (const toolCall of responseMessage.tool_calls) {
-                    const functionName = toolCall.function.name;
-                    const functionArgs = JSON.parse(toolCall.function.arguments);
-                    
-                    let functionResult;
-                    switch (functionName) {
-                        case "search_semantic_properties":
-                            functionResult = await this.vectorService.semanticSearch(
-                                functionArgs.query, 
-                                functionArgs.limit || 5
-                            );
-                            break;
-                        case "search_filtered_properties":
-                            functionResult = await this.graphService.searchProperties(functionArgs);
-                            break;
-                        case "get_available_cities":
-                            functionResult = await this.graphService.getCities();
-                            break;
-                        case "get_available_neighborhoods":
-                            functionResult = await this.graphService.getNeighborhoods(functionArgs.city);
-                            break;
+            if (run.status === 'requires_action') {
+                const toolCall = run.required_action.submit_tool_outputs.tool_calls[0];
+                const functionName = toolCall.function.name;
+                const args = JSON.parse(toolCall.function.arguments);
+                
+                if (functionName === 'find_properties') {
+                    const searchResults = await this.graphService.searchProperties(args);
+                    const finalResults = searchResults.slice(0, 3);
+
+                    if (finalResults.length > 0) {
+                        await this.bot.sendMessage(chatId, `¡Genial! He encontrado ${finalResults.length} ${finalResults.length > 1 ? 'opciones' : 'opción'} que podrían interesarte:`);
+
+                        for (const property of finalResults) {
+                            const formattedMessage = this.formatPropertyMessage(property);
+                            
+                            const options = {
+                                parse_mode: 'MarkdownV2',
+                                reply_markup: {
+                                    inline_keyboard: [
+                                        [
+                                            { text: '🔗 Ver Anuncio', url: property.id },
+                                            { text: '🗺️ Ver en Mapa', url: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(property.barrio + ',' + property.ciudad )}` }
+                                        ]
+                                    ]
+                                }
+                            };
+                            await this.bot.sendMessage(chatId, formattedMessage, options);
+                            await this.sleep(400);
+                        }
+                    } else {
+                        await this.bot.sendMessage(chatId, "😕 Lo siento, no he encontrado propiedades que coincidan con tus criterios. ¿Quieres probar con una búsqueda más amplia?");
                     }
-
-                    const finalResponse = await this.openai.chat.completions.create({
-                        model: "gpt-3.5-turbo-1106",
-                        messages: [
-                            {
-                                role: "system",
-                                content: `Eres un asistente de propiedades. Presenta los resultados de manera clara.
-                                        FORMATO:
-                                        🏠 [Título]
-                                        📍 [Ubicación]
-                                        💰 Precio: [Precio]€
-                                        🛏️ Habitaciones: [Número]
-                                        📐 Metros: [Metros]m²
-                                        ⭐ Características: [Lista]
-                                        🌱 Certificado: [Certificado]
-                                        🔗 Enlace: [URL]`
-                            },
-                            { role: "user", content: msg.text },
-                            responseMessage,
-                            {
-                                role: "tool",
-                                tool_call_id: toolCall.id,
-                                content: JSON.stringify(functionResult, null, 2)
-                            }
-                        ]
-                    });
-
-                    await this.bot.sendMessage(
-                        chatId, 
-                        finalResponse.choices[0].message.content,
-                        { parse_mode: 'Markdown' }
-                    );
                 }
-            } else {
-                await this.bot.sendMessage(chatId, responseMessage.content);
-            }
-        } catch (error) {
-            console.error("Error con ChatGPT:", error);
-            await this.bot.sendMessage(chatId, "❌ Lo siento, hubo un error procesando tu mensaje.");
-        }
-    }
-
-    async sendWelcome(chatId) {
-        const welcomeMessage = `
-👋 ¡Hola! Soy tu asistente de búsqueda de propiedades con IA.
-
-🏠 **¿Qué puedo hacer?**
-• Buscar propiedades por descripción o características
-• Filtrar por ciudad, precio, habitaciones, metros
-• Mostrar propiedades similares
-• Informar sobre ciudades y barrios disponibles
-
-💬 **Ejemplos:**
-- "Busca apartamentos en Madrid centro"
-- "Quiero un piso de 3 habitaciones por menos de 1000€"
-- "¿Qué barrios tienes disponibles en Valencia?"
-
-🔧 **Comandos:**
-/scrape [url] - Extraer propiedades
-/search [términos] - Búsqueda directa
-
-¡Estoy aquí para ayudarte! 🏡
-        `.trim();
-
-        await this.bot.sendMessage(chatId, welcomeMessage);
-    }
-
-    async handleScrapeCommand(msg, url) {
-        const chatId = msg.chat.id;
-        if (!url) {
-            await this.bot.sendMessage(chatId, "❌ Usa: /scrape [url_idealista]");
-            return;
-        }
-
-        await this.bot.sendMessage(chatId, "🔄 Iniciando scraping... Esto puede tomar unos minutos.");
-        try {
-            const scraper = new IdealistaScraper();
-            const propiedades = await scraper.scrape(url);
-            await this.bot.sendMessage(chatId, `✅ Scraping completado! ${propiedades.length} propiedades procesadas.`);
-        } catch (error) {
-            console.error("Error en scraping:", error);
-            await this.bot.sendMessage(chatId, "❌ Error: " + error.message);
-        }
-    }
-
-    async handleSearchCommand(msg, query) {
-        const chatId = msg.chat.id;
-        try {
-            const results = await this.vectorService.semanticSearch(query, 5);
-            if (results.length === 0) {
-                await this.bot.sendMessage(chatId, "❌ No se encontraron propiedades.");
                 return;
             }
+            
+            if (run.status === 'completed') {
+                const messages = await this.openai.beta.threads.messages.list(threadId);
+                const responseText = messages.data[0].content[0].text.value;
+                await this.bot.sendMessage(chatId, responseText);
+            }
 
-            let response = `🔍 **Resultados para: \"${query}\"**\n\n`;
-            results.forEach((result, index) => {
-                const meta = result.metadata;
-                response += `🏠 **Propiedad ${index + 1}**\n`;
-                response += `📍 ${meta.titulo}\n`;
-                response += `🏙️ ${meta.ciudad}, ${meta.barrio}\n`;
-                response += `💰 ${meta.precio}€ | 🛏️ ${meta.habitaciones}hab | 📐 ${meta.metros}m²\n`;
-                if (meta.energetico) response += `🌱 Certificado: ${meta.energetico}\n`;
-                if (meta.garaje) response += `🚗 ${meta.garaje}\n`;
-                response += `🔗 [Ver propiedad](${meta.url})\n\n`;
-            });
-
-            await this.bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
         } catch (error) {
-            console.error("Error en búsqueda:", error);
-            await this.bot.sendMessage(chatId, "❌ Error en la búsqueda: " + error.message);
+            console.error("❌ Error fatal en el flujo del asistente:", error);
+            await this.bot.sendMessage(chatId, "Ha ocurrido un error grave. Por favor, intenta reiniciar la conversación con /start.");
         }
     }
+    
+    async sendWelcome(chatId) {
+        const welcomeMessage = `
+👋 ¡Hola! Soy tu **Asistente Inmobiliario con IA**.
+
+He reiniciado nuestra conversación. Ahora puedes preguntarme lo que necesites sobre propiedades.
+
+**Ejemplos:**
+- "Busca un ático con mucha luz y una terraza grande en Valencia"
+- "Encuéntrame pisos de 2 habitaciones en el barrio de Gràcia, Barcelona, el más barato"
+
+¡Dime qué estás buscando! 🏡
+        `;
+        await this.bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+    }
+    async close() {
+        console.log("🔌 Cerrando el bot de Telegram y las conexiones a servicios...");
+        if (this.bot.isPolling()) {
+            await this.bot.stopPolling();
+        }
+        await this.graphService.close();
+        await this.vectorService.close();
+        console.log("✅ Todas las conexiones han sido cerradas.");
+    }
+    sleep = ms => new Promise(r => setTimeout(r, ms));
 }
 
 module.exports = { TelegramService };

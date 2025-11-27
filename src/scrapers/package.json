@@ -1,23 +1,29 @@
 {
-  "name": "scrapers",
+  "name": "idealista-ai-system",
   "version": "1.0.0",
-  "description": "",
-  "main": "idealista.js",
+  "description": "Sistema de IA con base de conocimiento en grafos para búsqueda de propiedades.",
+  "main": "bot.js",
   "scripts": {
-    "start": "node main.js",
-    "scrape": "node main.js",
+    "start": "node bot.js",
+    "scrape": "node scraper.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "nodejs",
+    "neo4j",
+    "chromadb",
+    "telegram",
+    "openai",
+    "selenium"
+  ],
+  "author": "Tu Nombre",
   "license": "ISC",
   "dependencies": {
-    "chromadb": "^1.10.5",
-    "chromadb-default-embed": "^2.14.0",
-    "dotenv": "^16.3.1",
-    "neo4j-driver": "^5.13.0",
-    "node-telegram-bot-api": "^0.64.0",
-    "openai": "^4.20.1",
-    "selenium-webdriver": "^4.16.0"
+    "chromadb": "^1.8.1",
+    "dotenv": "^16.4.5",
+    "neo4j-driver": "^5.20.0",
+    "node-telegram-bot-api": "^0.65.1",
+    "openai": "^4.47.1",
+    "selenium-webdriver": "^4.21.0"
   }
 }

@@ -3,7 +3,6 @@ const { Builder, By, until } = require("selenium-webdriver");
 const chrome = require("selenium-webdriver/chrome");
 const fs = require("fs");
 const net = require("net");
-const readline = require("readline");
 const { Neo4jService } = require('./services/Neo4jService.js');
 const { ChromaService } = require('./services/ChromaService.js');
 
@@ -14,189 +13,202 @@ class IdealistaScraper {
         this.driver = null;
     }
 
-    sleep = ms => new Promise(r => setTimeout(r, ms))
-    random = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
+    // --- FUNCIONES DE AYUDA COMPLETAS ---
+    sleep = ms => new Promise(r => setTimeout(r, ms));
+    random = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
     async waitForPort(port = 9222, timeout = 15000) {
-        const start = Date.now()
+        const start = Date.now();
         return new Promise((resolve, reject) => {
             const check = () => {
-                const socket = new net.Socket()
+                const socket = new net.Socket();
                 socket
-                    .once("connect", () => { socket.destroy(); resolve(true) })
+                    .once("connect", () => { socket.destroy(); resolve(true); })
                     .once("error", () => {
-                        socket.destroy()
-                        if (Date.now() - start > timeout) reject(new Error("⏰ Timeout esperando puerto 9222"))
-                        else setTimeout(check, 400)
+                        socket.destroy();
+                        if (Date.now() - start > timeout) reject(new Error("⏰ Timeout esperando el puerto de depuración de Chrome (9222)"));
+                        else setTimeout(check, 400);
                     })
-                    .connect(port, "127.0.0.1")
-            }
-            check()
-        })
+                    .connect(port, "127.0.0.1");
+            };
+            check();
+        });
     }
 
-    async humanScroll(driver) {
-        for (let i = 0; i < this.random(3, 6); i++) {
-            await driver.executeScript(`window.scrollBy(0, ${this.random(500, 900)});`)
-            await this.sleep(this.random(700, 1600))
-        }
+    async initBrowser() {
+        const profile = "C:\\temp\\ChromeProfile";
+        if (!fs.existsSync(profile)) fs.mkdirSync(profile, { recursive: true });
+        console.log("🌐 Iniciando Chrome con modo depuración...");
+        const chromePath = `"${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe"`;
+        exec(`${chromePath} --remote-debugging-port=9222 --user-data-dir="${profile}" --start-maximized`);
+        await this.waitForPort();
+        const options = new chrome.Options();
+        options.options_["debuggerAddress"] = "127.0.0.1:9222";
+        this.driver = await new Builder().forBrowser("chrome").setChromeOptions(options).build();
+        return this.driver;
     }
 
     async aceptarCookies(driver) {
         try {
-            const btn = await driver.wait(
-                until.elementLocated(By.id("didomi-notice-agree-button")),
-                5000
-            )
-            await driver.executeScript("arguments[0].scrollIntoView()", btn)
-            await this.sleep(400)
-            await btn.click()
-        } catch { }
+            const btn = await driver.wait(until.elementLocated(By.id("didomi-notice-agree-button")), 5000);
+            await driver.executeScript("arguments[0].scrollIntoView()", btn);
+            await this.sleep(400);
+            await btn.click();
+        } catch {
+            console.log("ℹ️ No se encontró el banner de cookies o ya fue aceptado.");
+        }
     }
 
     parseDireccion(texto) {
-        if (!texto) return { calle: "", barrio: "", ciudad: "" }
-        let clean = texto.replace(/[–—]/g, "-").replace(/\s+/g, " ").trim()
-        const idx = clean.toLowerCase().indexOf(" en ")
-        if (idx !== -1) clean = clean.substring(idx + 4).trim()
-        const partes = clean.split(/,| - /).map(s => s.trim()).filter(Boolean)
-        let calle = "", barrio = "", ciudad = ""
-        if (partes.length === 1) ciudad = partes[0]
-        if (partes.length === 2) { barrio = partes[0]; ciudad = partes[1] }
+        if (!texto) return { calle: "", barrio: "", ciudad: "" };
+        let clean = texto.replace(/[–—]/g, "-").replace(/\s+/g, " ").trim();
+        const idx = clean.toLowerCase().indexOf(" en ");
+        if (idx !== -1) clean = clean.substring(idx + 4).trim();
+        const partes = clean.split(/,| - /).map(s => s.trim()).filter(Boolean);
+        let calle = "", barrio = "", ciudad = "";
+        if (partes.length === 1) ciudad = partes[0];
+        if (partes.length === 2) { barrio = partes[0]; ciudad = partes[1]; }
         if (partes.length >= 3) {
-            calle = partes[0]
-            barrio = partes[1]
-            ciudad = partes.slice(2).join(", ")
+            calle = partes[0];
+            barrio = partes[1];
+            ciudad = partes.slice(2).join(", ");
         }
-        const cap = s => s ? s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : ""
-        return { calle: cap(calle), barrio: cap(barrio), ciudad: cap(ciudad) }
+        const cap = s => s ? s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : "";
+        return { calle: cap(calle), barrio: cap(barrio), ciudad: cap(ciudad) };
     }
 
-    async extraerDetalles(driver, url) {
-        await driver.get(url)
-        await this.sleep(1500)
-        let descripcion_detallada = ""
-        try {
-            const p = await driver.findElement(By.css(".comment p"))
-            descripcion_detallada = (await p.getAttribute("innerHTML"))
-                .replace(/<br\s*\/?>/gi, "\n")
-                .replace(/<\/?p>/gi, "")
-                .trim()
-        } catch { }
-        const caracteristicas = []
-        try {
-            const bloques = await driver.findElements(By.css(
-                "#details .details-property-feature-one li, #details .details-property-feature-two li"
-            ))
-            for (const li of bloques) {
-                const txt = (await li.getText()).trim()
-                if (txt.length > 1) caracteristicas.push(txt)
-            }
-        } catch { }
-        let energetico = "";
-        try {
-            const icon = await driver.findElement(By.css("span[class*='icon-energy']"));
-            const clase = await icon.getAttribute("class");
-            const match = clase.match(/icon-energy-([a-g])/i);
-            if (match) energetico = match[1].toUpperCase();
-            else energetico = clase;
-        } catch { }
-        return { descripcion_detallada, caracteristicas, energetico }
-    }
-
-    async initBrowser() {
-        const profile = "C:\\temp\\ChromeProfile"
-        if (!fs.existsSync(profile)) fs.mkdirSync(profile, { recursive: true })
-        console.log("🌐 Iniciando Chrome con depuración...")
-        exec(`"${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222 --user-data-dir="${profile}" --start-maximized`)
-        await this.waitForPort()
-        const options = new chrome.Options()
-        options.options_["debuggerAddress"] = "127.0.0.1:9222"
-        this.driver = await new Builder().forBrowser("chrome").setChromeOptions(options).build()
-        return this.driver
-    }
-
+    // --- MÉTODO DE SCRAPING CON LÓGICA DE LOTES Y NAVEGACIÓN CORREGIDA ---
     async scrape(urlBase) {
-        if (!fs.existsSync("./resultados")) fs.mkdirSync("./resultados")
-        const driver = await this.initBrowser()
-        const propiedades = []
-        let propiedadesGuardadas = 0
+        if (!fs.existsSync("./resultados")) fs.mkdirSync("./resultados");
+        
+        this.driver = await this.initBrowser();
+        const todasLasPropiedades = [];
+        
+        try {
+            await this.neo4jService.connect();
+            await this.chromaService.initialize();
 
-        console.log("📍 Abriendo:", urlBase)
-        await driver.get(urlBase)
-        await this.aceptarCookies(driver)
-        await driver.wait(until.elementLocated(By.css("div.item-info-container")), 15000)
+            console.log("📍 Abriendo URL base:", urlBase);
+            await this.driver.get(urlBase);
+            await this.aceptarCookies(this.driver);
+            await this.driver.wait(until.elementLocated(By.css("div.item-info-container")), 15000);
 
-        let page = 1
-        while (true) {
-            console.log(`📄 Página ${page}`)
-            await this.humanScroll(driver)
-            let items = await driver.findElements(By.css("div.item-info-container"))
-            if (!items.length) break
+            let page = 1;
+            let keepScraping = true;
+            let totalPropiedadesGuardadas = 0;
 
-            for (let i = 0; i < items.length; i++) {
-                items = await driver.findElements(By.css("div.item-info-container"))
-                const item = items[i]
+            while (keepScraping) {
+                console.log(`\n📄 Procesando página de resultados ${page}...`);
+                
+                // --- INICIO DE LA MODIFICACIÓN ---
+                // 1. Guardamos la URL de la página de resultados actual
+                const currentPageUrl = await this.driver.getCurrentUrl();
+                console.log(`   URL de la página de resultados: ${currentPageUrl}`);
+                // --- FIN DE LA MODIFICACIÓN ---
+
+                const urlsDelLote = [];
+                const itemLinks = await this.driver.findElements(By.css("a.item-link"));
+                const urlsDeLaPagina = await Promise.all(itemLinks.map(link => link.getAttribute('href')));
+                
+                for (const url of urlsDeLaPagina) {
+                    if (url.startsWith('http' )) {
+                        urlsDelLote.push(url);
+                    } else {
+                        urlsDelLote.push(`https://www.idealista.com${url}` );
+                    }
+                }
+
+                console.log(`📦 Lote de ${urlsDelLote.length} URLs preparado. Iniciando procesamiento...`);
+
+                // --- MINI FASE 2: Procesar el lote actual ---
+                for (const link of urlsDelLote) {
+                    try {
+                        console.log(`\n   🔍 Procesando URL: ${link}`);
+                        await this.driver.get(link);
+                        await this.sleep(this.random(1000, 1800));
+
+                        const tituloCompleto = await this.driver.findElement(By.css(".main-info__title-main")).getText().catch(() => "");
+                        const priceText = await this.driver.findElement(By.css(".info-data-price")).getText().catch(() => "");
+                        const priceNum = parseInt(priceText.replace(/[^\d]/g, ""), 10) || null;
+                        const detailsEls = await this.driver.findElements(By.css(".info-features span"));
+                        const details = await Promise.all(detailsEls.map(d => d.getText()));
+                        let habitaciones = null, metros = null;
+                        details.forEach(d => {
+                            if (/hab/i.test(d)) habitaciones = parseInt(d);
+                            else if (/m²/i.test(d)) metros = parseInt(d);
+                        });
+                        const { barrio, ciudad } = this.parseDireccion(tituloCompleto);
+                        let descripcion_detallada = "", caracteristicas_detalle = [];
+                        try {
+                            const p = await this.driver.findElement(By.css(".comment p"));
+                            descripcion_detallada = await p.getAttribute("innerHTML");
+                        } catch {}
+                        try {
+                            const bloques = await this.driver.findElements(By.css("#details .details-property-feature-one li, #details .details-property-feature-two li"));
+                            caracteristicas_detalle = await Promise.all(bloques.map(li => li.getText()));
+                        } catch {}
+
+                        const propiedad = {
+                            titulo_completo: tituloCompleto,
+                            barrio, ciudad,
+                            price_num: priceNum,
+                            habitaciones, metros,
+                            url: link,
+                            descripcion_detallada,
+                            caracteristicas_detalle,
+                        };
+                        
+                        todasLasPropiedades.push(propiedad);
+                        
+                        await this.neo4jService.saveProperty(propiedad);
+                        await this.chromaService.storeProperty(propiedad);
+                        
+                        totalPropiedadesGuardadas++;
+                        console.log(`   💾 Propiedad ${totalPropiedadesGuardadas} guardada: ${tituloCompleto}`);
+
+                    } catch (e) {
+                        console.log(`   ❌ Error procesando la URL ${link}:`, e.message);
+                    }
+                }
+                console.log(`✅ Lote procesado.`);
+
+                // --- INICIO DE LA MODIFICACIÓN ---
+                // 2. Volvemos a la página de resultados antes de buscar el botón "Siguiente"
+                console.log("   ↩️ Volviendo a la página de resultados para continuar...");
+                await this.driver.get(currentPageUrl);
+                await this.driver.wait(until.elementLocated(By.css("div.item-info-container")), 10000); // Esperar a que cargue
+                // --- FIN DE LA MODIFICACIÓN ---
+
+                // --- Navegar a la siguiente página para el próximo lote ---
                 try {
-                    const tituloCompleto = await item.findElement(By.css("a.item-link")).getText().catch(() => "")
-                    const priceText = await item.findElement(By.css("span.item-price")).getText().catch(() => "")
-                    const priceNum = parseInt(priceText.replace(/[^\d]/g, ""), 10) || null
-                    const link = await item.findElement(By.css("a.item-link")).getAttribute("href").catch(() => "")
-                    const detailsEls = await item.findElements(By.xpath(".//span[@class='item-detail']"))
-                    const details = await Promise.all(detailsEls.map(d => d.getText()))
-                    let habitaciones = null, metros = null, extrasArray = []
-                    for (const d of details) {
-                        if (/hab/i.test(d)) habitaciones = parseInt(d)
-                        else if (/m²/i.test(d)) metros = parseInt(d)
-                        else extrasArray.push(d)
-                    }
-                    const extras = extrasArray.join(" | ")
-                    const { calle, barrio, ciudad } = this.parseDireccion(tituloCompleto)
-                    const garaje = /garaje|parking/i.test(extras) ? "Garaje incluido" : ""
-                    const detalles = await this.extraerDetalles(driver, link)
-                    const propiedad = {
-                        titulo_completo: tituloCompleto,
-                        calle, barrio, ciudad,
-                        price_num: priceNum,
-                        habitaciones, metros, extras, garaje,
-                        url: link,
-                        descripcion_detallada: detalles.descripcion_detallada,
-                        caracteristicas_detalle: detalles.caracteristicas,
-                        energetico: detalles.energetico
-                    }
-                    propiedades.push(propiedad)
-                    // 🔄 GUARDAR EN SERVICIOS
-                    await this.neo4jService.saveProperty(propiedad)
-                    await this.chromaService.storeProperty(propiedad)
-                    propiedadesGuardadas++
-                    console.log(`💾 Propiedad ${propiedadesGuardadas} guardada`)
-                    await driver.navigate().back()
-                    await this.sleep(1500)
-                } catch (e) {
-                    console.log("❌ Error en anuncio:", e.message)
+                    const nextButton = await this.driver.findElement(By.css("li.next:not(.disabled) a"));
+                    await this.driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", nextButton);
+                    await this.sleep(500);
+                    await nextButton.click();
+                    await this.sleep(this.random(1500, 2500));
+                    page++;
+                } catch {
+                    console.log("🏁 No hay más páginas de resultados. Finalizando scraping.");
+                    keepScraping = false;
                 }
             }
-            let next
-            try { next = await driver.findElement(By.css("li.next:not(.disabled) a")) } catch { }
-            if (!next) break
-            await driver.executeScript("arguments[0].scrollIntoView()", next)
-            await this.sleep(1000)
-            await next.click()
-            await this.sleep(1800)
-            page++
+
+        } finally {
+            if (this.driver) await this.driver.quit();
+            await this.neo4jService.close();
+            await this.chromaService.close();
+            this.guardarResultados(todasLasPropiedades);
         }
-        await driver.quit()
-        await this.neo4jService.close()
-        await this.chromaService.close()
-        this.guardarResultados(propiedades)
-        return propiedades
     }
 
     guardarResultados(propiedades) {
-        fs.writeFileSync("./resultados/Todas_propiedades.json", JSON.stringify(propiedades, null, 2))
-        console.log(`💾 Guardadas ${propiedades.length} viviendas en archivo.`)
+        if (propiedades.length === 0) {
+            console.log("⚠️ No se guardaron propiedades, no se generarán archivos de resultados.");
+            return;
+        }
+        fs.writeFileSync("./resultados/Todas_propiedades.json", JSON.stringify(propiedades, null, 2));
+        console.log(`\n💾 Guardadas ${propiedades.length} viviendas en ./resultados/Todas_propiedades.json`);
         
-        // Estadísticas
         const stats = {
             total: propiedades.length,
             conPrecio: propiedades.filter(p => p.price_num).length,
@@ -205,10 +217,10 @@ class IdealistaScraper {
                 acc[p.ciudad] = (acc[p.ciudad] || 0) + 1;
                 return acc;
             }, {})
-        }
+        };
         
-        fs.writeFileSync("./resultados/estadisticas.json", JSON.stringify(stats, null, 2))
-        console.log("✅ Scraping finalizado.")
+        fs.writeFileSync("./resultados/estadisticas.json", JSON.stringify(stats, null, 2));
+        console.log("📊 Estadísticas guardadas en ./resultados/estadisticas.json");
     }
 }
 

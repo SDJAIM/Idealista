@@ -3,27 +3,26 @@ const OpenAI = require('openai');
 
 class ChromaService {
     constructor() {
-        // Mismo enfoque que tu profesor - ChromaDB en memoria
-        this.client = new ChromaClient();
-        this.openai = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY
+        this.client = new ChromaClient({
+            path: process.env.CHROMADB_URL,
+            tenant: 'default_tenant',     
+            database: 'default_database'  
         });
+        this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
         this.collection = null;
         this.isInitialized = false;
     }
 
     async initialize() {
+        if (this.isInitialized) return;
         try {
-            console.log('🔄 Inicializando ChromaDB (modo memoria)...');
-            
-            // Crear colección igual que tu profesor
+            console.log('🔄 Inicializando ChromaDB...');
             this.collection = await this.client.getOrCreateCollection({
                 name: "idealista_properties",
+                metadata: { "hnsw:space": "cosine" }
             });
-            
             this.isInitialized = true;
-            console.log('✅ ChromaDB listo - igual que el ejemplo del profesor');
-            
+            console.log('✅ ChromaDB listo y conectado.');
         } catch (error) {
             console.error('❌ Error inicializando ChromaDB:', error.message);
             throw error;
@@ -31,48 +30,40 @@ class ChromaService {
     }
 
     async generatePropertyEmbedding(property) {
-        try {
-            // Enfoque similar al de tu profesor pero simplificado
-            const prompt = `
+        const prompt = `
             Propiedad: ${property.titulo_completo}
             Ubicación: ${property.ciudad}, ${property.barrio}
             Precio: ${property.price_num}€
-            Habitaciones: ${property.habitaciones}
-            Metros: ${property.metros}m²
-            Extras: ${property.extras}
+            Características: ${property.habitaciones} habitaciones, ${property.metros}m².
+            Extras: ${property.extras}. ${property.caracteristicas_detalle.join(', ')}
             Descripción: ${property.descripcion_detallada}
-            `.trim();
+        `.trim().replace(/\s+/g, ' ');
 
-            // Generar embedding como en el ejemplo
+        try {
             const response = await this.openai.embeddings.create({
-                model: "text-embedding-ada-002",
+                model: "text-embedding-3-small", // Modelo más nuevo y eficiente
                 input: prompt
             });
-
-            return {
-                embedding: response.data[0].embedding,
-                document: prompt
-            };
-            
+            return { embedding: response.data[0].embedding, document: prompt };
         } catch (error) {
-            console.error('❌ Error con OpenAI, usando fallback...');
-            // Fallback sin embeddings - solo documento de texto
-            return {
-                embedding: [], // Array vacío como fallback
-                document: `Propiedad en ${property.ciudad} - ${property.price_num}€ - ${property.habitaciones}hab`
-            };
+            console.error('❌ Error generando embedding con OpenAI:', error.message);
+            // Fallback sin embedding para no detener el proceso
+            return { embedding: null, document: prompt };
         }
     }
 
     async storeProperty(property) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
+        if (!this.isInitialized) await this.initialize();
 
         try {
-            const propertyId = `prop_${property.url?.split('/').pop() || Date.now()}`;
+            // Usar la URL como ID único y robusto
+            const propertyId = property.url;
+            if (!propertyId) {
+                console.warn('⚠️ Propiedad sin URL, no se puede guardar en ChromaDB.');
+                return null;
+            }
             
-            console.log(`📝 Procesando: ${property.titulo_completo}`);
+            console.log(`[ChromaDB] Procesando: ${property.titulo_completo}`);
             const { embedding, document } = await this.generatePropertyEmbedding(property);
             
             const metadata = {
@@ -86,17 +77,19 @@ class ChromaService {
                 timestamp: new Date().toISOString()
             };
 
-            // Método igual al de tu profesor
-            await this.collection.add({
+            const payload = {
                 ids: [propertyId],
                 documents: [document],
-                embeddings: embedding.length > 0 ? [embedding] : undefined,
                 metadatas: [metadata]
-            });
+            };
+            if (embedding) {
+                payload.embeddings = [embedding];
+            }
 
-            console.log(`✅ Guardado en ChromaDB: ${property.titulo_completo}`);
+            await this.collection.upsert(payload); // Upsert es más seguro que 'add'
+
+            console.log(`[ChromaDB] ✅ Guardado: ${property.titulo_completo}`);
             return propertyId;
-            
         } catch (error) {
             console.error('❌ Error guardando en ChromaDB:', error.message);
             return null;
@@ -104,55 +97,36 @@ class ChromaService {
     }
 
     async semanticSearch(query, limit = 5) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
+        if (!this.isInitialized) await this.initialize();
 
         try {
-            console.log(`🔍 Buscando: "${query}"`);
-            
-            // Búsqueda por texto como en el ejemplo de tu profesor
+            console.log(`[ChromaDB] 🔍 Búsqueda semántica: "${query}"`);
+            const queryEmbedding = await this.openai.embeddings.create({
+                model: "text-embedding-3-small",
+                input: query
+            });
+
             const results = await this.collection.query({
-                queryTexts: [query],
+                queryEmbeddings: [queryEmbedding.data[0].embedding],
                 nResults: limit
             });
 
-            console.log(`✅ Encontrados ${results.ids[0].length} resultados`);
-            
-            // Mismo formato de respuesta que tu profesor
+            console.log(`[ChromaDB] ✅ Encontrados ${results.ids[0].length} resultados.`);
             return results.metadatas[0].map((metadata, index) => ({
                 id: results.ids[0][index],
                 document: results.documents[0][index],
                 metadata: metadata,
-                distance: results.distances ? results.distances[0][index] : 0
+                distance: results.distances[0][index]
             }));
-            
         } catch (error) {
-            console.error('❌ Error en búsqueda:', error.message);
-            return [];
-        }
-    }
-
-    async testSearch() {
-        // Prueba idéntica a la de tu profesor
-        try {
-            const results = await this.collection.query({
-                queryTexts: ["apartamento mallorca terraza"],
-                nResults: 3
-            });
-
-            const properties = results.metadatas[0].map(result => result);
-            console.log('🔍 Resultados de prueba:', properties);
-            return properties;
-            
-        } catch (error) {
-            console.error('❌ Error en prueba:', error);
+            console.error('❌ Error en búsqueda semántica:', error.message);
             return [];
         }
     }
 
     async close() {
-        console.log('🔌 ChromaService cerrado');
+        // ChromaDB http client no requiere un cierre explícito, pero lo mantenemos por consistencia
+        console.log('🔌 ChromaService desconectado.' );
     }
 }
 
